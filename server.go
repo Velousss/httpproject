@@ -32,7 +32,7 @@ func sendFileHandler(w http.ResponseWriter, r *http.Request) {
 
 	file, header, err := r.FormFile("file")
 	handler.HandleError(err)
-	fmt.Printf("Recieved File: %s\n", header.Filename)
+	fmt.Printf("Received File: %s\n", header.Filename)
 
 	fileContent, err := io.ReadAll(file)
 	handler.HandleError(err)
@@ -51,6 +51,6 @@ func main() {
 		Handler: mux,
 	}
 
-	err := server.ListenAndServe()
+	err := server.ListenAndServeTLS("./certificate/cert.pem", "./certificate/key.pem")
 	handler.HandleError(err)
 }

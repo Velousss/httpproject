@@ -1,149 +1,124 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
+	"main/data"
+	"main/handler"
 	"mime/multipart"
 	"net/http"
 	"os"
-	"path/filepath"
+	"strings"
 	"time"
 )
 
-type User struct {
-	First string `json:"first"`
-	Last  string `json:"last"`
-}
-
-func postUser(url string, user User) error {
-	buf := new(bytes.Buffer)
-	err := json.NewEncoder(buf).Encode(&user)
-	if err != nil {
-		return err
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	client := &http.Client{
-		Transport: &http.Transport{
-			DisableKeepAlives: true,
-		},
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, buf)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusAccepted {
-		return fmt.Errorf("expected status %d; actual status %d", http.StatusAccepted, resp.StatusCode)
-	}
-	return nil
-}
-
-func postMultipartForm(url string, formFields map[string]string, files []string) error {
-	reqBody := new(bytes.Buffer)
-	w := multipart.NewWriter(reqBody)
-
-	for k, v := range formFields {
-		err := w.WriteField(k, v)
-		if err != nil {
-			return err
+func waitServer(url string, duration time.Duration) bool {
+	deadline := time.Now().Add(duration)
+	for time.Now().Before(deadline) {
+		resp, err := http.Get(url)
+		handler.HandleError(err)
+		if resp.StatusCode == http.StatusOK {
+			resp.Body.Close()
+			return false
 		}
 	}
-
-	for i, file := range files {
-		filePart, err := w.CreateFormFile(fmt.Sprintf("file%d", i+1), filepath.Base(file))
-		if err != nil {
-			return err
-		}
-
-		f, err := os.Open(file)
-		if err != nil {
-			return err
-		}
-		defer f.Close()
-
-		_, err = io.Copy(filePart, f)
-		if err != nil {
-			return err
-		}
-	}
-
-	err := w.Close()
-	if err != nil {
-		return err
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	client := &http.Client{
-		Transport: &http.Transport{
-			DisableKeepAlives: true,
-		},
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, reqBody)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", w.FormDataContentType())
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("expected status %d; actual status %d", http.StatusOK, resp.StatusCode)
-	}
-
-	body, err := ioutil.ReadAll(resp.Body)
-	if err != nil {
-		return err
-	}
-
-	fmt.Printf("Response: %s\n", body)
-	return nil
+	return true
 }
 
 func main() {
-	serverURL := "http://localhost:80/user"
-	user := User{First: "Marvel", Last: "Cokro"}
 
-	err := postUser(serverURL, user)
-	if err != nil {
-		fmt.Println("Error posting user:", err)
+	if waitServer("http://localhost:9876", 5*time.Second) {
+		fmt.Println("Server not found")
 		return
 	}
-	fmt.Println("User posted successfully")
+	var choice int
+	for {
+		fmt.Println("Main Menu")
+		fmt.Println("1. Get message")
+		fmt.Println("2. Send file")
+		fmt.Println("3. Quit")
+		fmt.Print(">> ")
+		fmt.Scanf("%d\n", &choice)
+		if choice == 1 {
+			getMessage()
+		} else if choice == 2 {
+			sendFile()
+		} else if choice == 3 {
+			break
+		} else {
+			fmt.Println("Invalid choice")
+		}
+	}
+}
 
-	formFields := map[string]string{
-		"date": time.Now().Format(time.RFC3339),
-	}
-	files := []string{
-		"./files/tes.txt",
-		"./files/anjay.txt",
+func getMessage() {
+	resp, err := http.Get("http://localhost:9876")
+	handler.HandleError(err)
+	defer resp.Body.Close()
+
+	data, err := io.ReadAll(resp.Body)
+	handler.HandleError(err)
+
+	fmt.Println("Server:", string(data))
+}
+
+func sendFile() {
+	var name string
+	var age int
+
+	scanner := bufio.NewReader(os.Stdin)
+	fmt.Print("Input name: ")
+	name, _ = scanner.ReadString('\n')
+	name = strings.TrimSpace(name)
+
+	fmt.Print("Input age: ")
+	fmt.Scanf("%d\n", &age)
+
+	person := data.Person{
+		Name: name,
+		Age:  age,
 	}
 
-	err = postMultipartForm("https://httpbin.org/post", formFields, files)
-	if err != nil {
-		fmt.Println("Error posting multipart form:", err)
-		return
-	}
-	fmt.Println("Multipart form posted successfully")
+	jsonData, err := json.Marshal(person)
+	handler.HandleError(err)
+
+	temp := new(bytes.Buffer)
+	w := multipart.NewWriter(temp)
+
+	personField, err := w.CreateFormField("Person")
+	handler.HandleError(err)
+
+	_, err = personField.Write(jsonData)
+	handler.HandleError(err)
+
+	file, err := os.Open("./file.txt")
+	handler.HandleError(err)
+	defer file.Close()
+
+	fileField, err := w.CreateFormFile("file", file.Name())
+	handler.HandleError(err)
+
+	_, err = io.Copy(fileField, file)
+	handler.HandleError(err)
+
+	err = w.Close()
+	handler.HandleError(err)
+
+	req, err := http.NewRequest("POST", "http://localhost:9876/sendFile", temp)
+	handler.HandleError(err)
+
+	req.Header.Set("Content-Type", w.FormDataContentType())
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	handler.HandleError(err)
+	defer resp.Body.Close()
+
+	data, err := io.ReadAll(resp.Body)
+	handler.HandleError(err)
+
+	fmt.Println("Server:", string(data))
 }
